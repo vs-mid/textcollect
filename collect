@@ -1,0 +1,239 @@
+#!/usr/bin/perl
+
+# Sa 4. Feb 17:10:56 CET 2017 -- vs
+#   Use like
+#
+#     ./u test-data/Kontoauszug_116480009__Nr.0012015_vom_30.01.2015_20150202121223.txt
+
+use warnings;
+use strict;
+use utf8;
+
+use IO::File;
+use YAML::Tiny;
+
+use Cf;
+#use Output::Excel;
+use Output::Yaml;
+#use Output::Csv;
+
+use RePlus;
+use State;
+use Field;
+use Action;
+
+#
+# Configuration
+#
+# my $config = YAML::Tiny->read('Kontoauszug.yaml');
+my $config = YAML::Tiny->read('ExtractNums.yaml');
+my $configKontoauszug = $config->[0]{'Parse'};
+
+# Configuration
+my $inputfilename = $ARGV[0]; # TODO This is (hopefully) used implicitly by the diamond op later on.
+my $basefilename; # $inputfilename, but without the dir components
+if ($inputfilename =~ /\/([^\/]+)$/) {
+  $basefilename = $1;
+} else {
+  $basefilename = $inputfilename;
+}
+# my $outputfilename = "/tmp/output.yaml";
+my $outputfilename = "/tmp/$basefilename.yaml";
+my $cf = Cf->new('Output');
+$cf->value(Output::Yaml->new($outputfilename));
+#$cf->value(Output::Csv->new($outputfilename));
+if (!defined $cf->value) {
+  die "cannot initialize Output";
+}
+
+Field->new('_Literal', 'Update'); # needed in Action
+
+foreach my $i (@$configKontoauszug) {
+  print "Configuration: Name $i->{'Name'}; Type: $i->{'Type'};\n";
+  #
+  # Re
+  #
+  if ($i->{'Type'} eq 'Re') {
+    my $re = RePlus->new($i->{'Name'}, $i->{'Pattern'});
+    if (exists $i->{'ExtractNames'}) {
+      $re->namesForMatches($i->{'ExtractNames'});
+    }
+  #
+  # State
+  #
+  } elsif ($i->{'Type'} eq 'State') {
+    my $st = State->new($i->{'Name'});
+    if (exists $i->{'Re'}) {
+      foreach $i (@{$i->{'Re'}}) {
+        $st->testAndAction($i->{'Name'}, $i->{'State'});
+      }
+    }
+    if (exists $i->{'OnExitAction'}) {
+      $st->onExit($i->{'OnExitAction'});
+    }
+    if (exists $i->{'PreEntryAction'}) {
+      $st->preEntry($i->{'PreEntryAction'});
+    }
+  #
+  # Field
+  #
+  } elsif ($i->{'Type'} eq 'Field') {
+    my $f = Field->new($i->{'Name'});
+    $f->actas($i->{'Collect'});
+  #
+  # Action
+  #
+  } elsif ($i->{'Type'} eq 'Action') {
+    my $a = Action->new($i->{'Name'});
+    if (exists $i->{'DoThis'}) {
+      foreach my $dothis (@{$i->{'DoThis'}}) {
+        $a->dothis([$dothis->{'Act'}, $dothis->{'On'}]);
+      }
+    }
+    #$a->emitCallback(\&emitRoutine);
+  } else {
+    warn "unknown type in Config: ''$i->{'Type'}";
+  }
+}
+
+#
+# Checking Configuration
+#
+if (!defined State->byName('Start')) {
+  warn "no Start symbol. Bad";
+  exit 1;
+}
+
+#
+# State change
+#
+my $parserState = State->new('_preStart')->newState('Start');
+
+LINE: while (<>) {
+  chop;
+  foreach my $reNameAndAction (@{$parserState->testAndAction}) {
+    my $reName = $reNameAndAction->[0];
+    my $newState = $reNameAndAction->[1];
+    if ($reName eq '_None') {
+      # LOGGING
+      printf "STATE: %s -> %s (no match on ''%s'') (%d);\n",
+       $parserState->name, $newState, $_, $.;
+      #
+      # State change
+      #
+      $parserState = $parserState->newState($newState);
+      next LINE;
+    }
+    my $re = RePlus->byName($reName);
+    if ($re->test($_)) {
+      # TODO Make a temporary copy of the values parsed out,
+      # then change the State.
+      my %fieldValue;
+      foreach my $matchName (@{$re->namesForMatches}) {
+	$fieldValue{$matchName} = $re->extract($matchName);
+#	my $r = Field->byName($matchName)->value($re->extract($matchName));
+#	if (!defined $r) {
+#	  # TODO error handling
+#	  warn sprintf "State %s: setting Field %s from RE %s failed",
+#	   $parserState->name, $matchName, $re->name;
+#	}
+      }
+      # LOGGING
+      printf "STATE: %s -> %s (%s) (%d);\n", # muell
+       $parserState->name, $newState, $reName, $.; # muell
+      #
+      # State change
+      #
+      $parserState = $parserState->newState($newState);
+
+      foreach my $matchName (@{$re->namesForMatches}) {
+        my $r = Field->byName($matchName)->value($fieldValue{$matchName});
+      }
+      # TODO Here is where we should invoke the OnEntryAction.
+
+      # TODO Shall we configuredly fall through here?
+      next LINE;
+    }
+  }
+  # Mostly, this is an error.
+  printf "State %s: NO MATCH for line %4d: %s;\n", $parserState->name, $., $_;
+}
+# $cf->value->getWorkbook->close; # Weird # TODO
+#
+# State change
+#
+$parserState = $parserState->newState('End');
+print "DONE. Taking things down.\n";
+$cf->value->takeDownOutputContexts;
+print "DONE taking things down\n";
+__END__
+
+# Possible actions: A change of the parser state.
+# Extracted material, or the whole line can be handed to
+# another pass which could be configured in another YAML
+# document in the same config file.
+# 
+# E. g., we could detect the beginning of running text,
+# hand each line on to the next state while watching for
+# an intermission or the end of the running text. The
+# intermission would consist of the footer of a page and
+# the header of the next page.
+# 
+# This way we would have like a separate parser handling
+# the running text without having to deal with page
+# breaks and the checks at the beginning of each page at
+# the same time.
+# 
+# We could use the extract of the running text as an
+# intermediate format and keep this in a file, too. We
+# could number the lines within the running text and
+# refer to these wich each booking record.
+
+# Acquistition of implicit values: We may think of
+# providing means to number lines.
+# 
+# What to do with values extracted:
+# 
+#   A new value may replace an old one. This makes sense with
+#   page numbers. The page number that a bookkeeping record
+#   appeared on may become part of the record. --
+# 
+#   Values may be piled up. This may make sense with the
+#   running text: We pile up records till we find the
+#   beginning of another record.
+# 
+#   Values may be passed on to another parser. This way
+#   we may define a process pipeline. E. g., the text
+#   running across pages may be handed over to a parser
+#   that just deals with breaking up the text into
+#   records. That second parser won't have to deal with
+#   the material introduced at page breaks.
+
+# So, when a RE matches, we may want to make a choice
+# for an action:
+# 
+#   -- change the parser state
+# 
+#   -- still move on and try to find another match (does
+#   that make sense?)
+# 
+#   -- pass the entire line on to another parser
+# 
+#   -- delete (consume) values previously extracted
+# 
+# With a value exracted or a set of values extracted, we
+# may do this:
+# 
+#   -- We may keep the value as part of the state of the
+#   parser, like a page number that is updated everytime
+#   a new value as a page number is encountered.
+# 
+#   -- We may append the value to an existing one.
+# 
+#   -- We may keep a list of values of the same name.
+# 
+#   -- We may temporarily keep a set of named values that
+#   are used upon a specific event.
+# 
+#   -- We may raise an error condition if a value of that
+#   name is known already.

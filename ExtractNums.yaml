@@ -1,0 +1,53 @@
+---
+# Fri Feb 28 13:36:22 CET 2020 -- meant to simply extract integer numbers
+#   when that makes up a line by itself. Only the first of a series of
+#   consecutive lines containing only numbers is extracted.
+Name: Start
+Parse:
+  - Type: Re
+    Name: integerFolio
+    Pattern: ^([1-9]\d*)$
+    ExtractNames:
+      - Folio
+  - Type: Re
+    Name: anyPageMaterial
+    Pattern: [a-zA-Z]
+# States
+  - Type: State
+    Name: Start
+    Re:
+      - Name: anyPageMaterial
+        State: runningText
+  - Type: State
+    Name: runningText
+    Re:
+      - Name: integerFolio
+        State: folioRead
+    OnExitAction: EmitFolio
+  - Type: State
+    Name: folioRead
+    Re:
+      - Name: anyPageMaterial
+        State: runningText
+  - Type: State
+    Name: End
+    PreEntryAction: LastAction
+# Actions
+  - Type: Action
+    Name: EmitFolio
+    DoThis:
+      - Act: EmitField
+        On: Folio
+  - Type: Action
+    Name: LastAction
+    DoThis:
+      - Act: EmitLiteral
+        On: "The End."
+      - Act: LogLiteral
+        On: "That's All Folks"
+      - Act: EmitField
+        On: Folio
+# Fields
+  - Type: Field
+    Name: Folio
+    Collect: Update
